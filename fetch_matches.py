@@ -1,5 +1,9 @@
 """Maç sayfalarını gerçek bir tarayıcıda açıp MatchCentre verisini `captures/` altına kaydeder.
 
+Veri iki yoldan alınır: önce sayfanın yüklenirken aldığı ağ yanıtları dinlenir
+(HTML belgesi ve JSON yanıtları); orada bulunamazsa sayfadaki `matchCentreData`
+nesnesi bellekten okunur.
+
 Örnek:
     python fetch_matches.py --ids 1900001 1900002
     python fetch_matches.py --ids-file ids.txt --max 30
@@ -14,6 +18,8 @@ Sınırlar (bilerek konmuştur, kapatma bayrağı yoktur):
   * Tek çalıştırmada en fazla `--max` maç (varsayılan 50) açılır.
   * `captures/` içinde zaten olan maçlar yeniden açılmaz.
   * Engelleme ya da doğrulama (CAPTCHA) sayfası görülürse çalışma durur; aşılmaya çalışılmaz.
+    Zaman aşımı gibi sıradan hatalarda ise maç atlanır, ID'si `failed_ids.txt`
+    dosyasına yazılır ve bir sonraki maça geçilir.
   * Tarayıcı kimliği (User-Agent, parmak izi) değiştirilmez.
 """
 
@@ -29,7 +35,10 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from urllib.robotparser import RobotFileParser
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import Page, Response, sync_playwright
+
+from matchcentre.extract import _from_html_text, _from_json_obj
 
 BASE_URL = "https://www.whoscored.com"
 MATCH_URL = BASE_URL + "/Matches/{match_id}/Live"
@@ -74,23 +83,59 @@ def _polite_pause() -> None:
     time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
 
+def _data_from_response(response: Response) -> dict | None:
+    """Bir ağ yanıtında MatchCentre verisi varsa onu döndürür."""
+    content_type = response.headers.get("content-type", "")
+    if response.request.resource_type not in ("document", "xhr", "fetch") or not response.ok:
+        return None
+    try:
+        text = response.text()
+    except PlaywrightError:  # yönlendirme ya da gövdesi alınamayan yanıt
+        return None
+    if "json" in content_type:
+        try:
+            return _from_json_obj(json.loads(text))
+        except json.JSONDecodeError:
+            return None
+    if "html" in content_type and "matchCentreData" in text:
+        return _from_html_text(text)
+    return None
+
+
 def fetch_match(page: Page, match_id: int, out_dir: Path) -> Path | None:
     """Tek bir maç sayfasını açar ve veriyi `out_dir/<match_id>.json` olarak kaydeder."""
-    resp = page.goto(MATCH_URL.format(match_id=match_id), wait_until="domcontentloaded")
-    if resp is not None and resp.status in (401, 403, 429):
-        raise Blocked(f"HTTP {resp.status} ({match_id}); çalışma durduruldu.")
-    _check_blocked(page)
+    captured: list[dict] = []
 
-    raw = page.evaluate(_EXTRACT_JS)
-    if not raw:
-        print(f"[veri yok] {match_id}: sayfada matchCentreData bulunamadı")
-        return None
+    def on_response(response: Response) -> None:
+        data = _data_from_response(response)
+        if data:
+            captured.append(data)
+
+    page.on("response", on_response)
+    try:
+        resp = page.goto(MATCH_URL.format(match_id=match_id), wait_until="domcontentloaded")
+        if resp is not None and resp.status in (401, 403, 429):
+            raise Blocked(f"HTTP {resp.status} ({match_id}); çalışma durduruldu.")
+        _check_blocked(page)
+        if not captured:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+    finally:
+        page.remove_listener("response", on_response)
+
+    if captured:
+        data, source = captured[-1], "ağ yanıtı"
+    else:
+        raw = page.evaluate(_EXTRACT_JS)
+        if not raw:
+            print(f"[veri yok] {match_id}: ağ yanıtlarında ve sayfada matchCentreData bulunamadı")
+            return None
+        data, source = json.loads(raw), "sayfa belleği"
 
     target = out_dir / f"{match_id}.json"
     # process_captures.py bu sarmalayıcıyı tanır ve matchId'yi buradan alır.
-    payload = {"matchId": match_id, "matchCentreData": json.loads(raw)}
+    payload = {"matchId": match_id, "matchCentreData": data}
     target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    print(f"[kaydedildi] {match_id}: {len(payload['matchCentreData'].get('events', []))} event")
+    print(f"[kaydedildi] {match_id}: {len(data.get('events', []))} event ({source})")
     return target
 
 
@@ -106,6 +151,7 @@ def ids_from_fixture_page(page: Page, url: str) -> list[int]:
 def run(match_ids: list[int], fixture_urls: list[str], out_dir: Path, max_matches: int, headless: bool) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     saved = 0
+    failed: list[int] = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=headless)
         page = browser.new_page()
@@ -135,13 +181,24 @@ def run(match_ids: list[int], fixture_urls: list[str], out_dir: Path, max_matche
                     continue
                 _polite_pause()
                 print(f"({n}/{len(ids)}) ", end="")
-                if fetch_match(page, match_id, out_dir):
-                    saved += 1
+                try:
+                    if fetch_match(page, match_id, out_dir):
+                        saved += 1
+                    else:
+                        failed.append(match_id)
+                except Blocked:
+                    raise
+                except (PlaywrightError, json.JSONDecodeError) as exc:
+                    print(f"[hata] {match_id}: {str(exc).splitlines()[0]}")
+                    failed.append(match_id)
         except Blocked as exc:
             print(f"\n[DURDU] {exc}", file=sys.stderr)
         finally:
             browser.close()
-    print(f"\nToplam {saved} maç kaydedildi -> {out_dir}")
+    if failed:
+        (out_dir / "failed_ids.txt").write_text("\n".join(map(str, failed)) + "\n")
+        print(f"\n{len(failed)} maç alınamadı; yeniden denemek için: --ids-file {out_dir / 'failed_ids.txt'}")
+    print(f"Toplam {saved} maç kaydedildi -> {out_dir}")
     return saved
 
 

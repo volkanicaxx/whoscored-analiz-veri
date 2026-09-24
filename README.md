@@ -15,8 +15,11 @@ Dosyaları `captures/` klasörüne koyun (git'e eklenmez).
 
 ### Alternatif: tarayıcı otomasyonu (`fetch_matches.py`)
 
-Maç sayfalarını gerçek bir Chromium penceresinde sırayla açar, sayfadaki
-`matchCentreData` nesnesini okur ve `captures/<matchId>.json` olarak kaydeder.
+Maç sayfalarını gerçek bir Chromium penceresinde sırayla açar. Sayfa yüklenirken
+gelen ağ yanıtlarını (HTML belgesi, XHR/fetch JSON'ları) dinler; veri orada yoksa
+sayfadaki `matchCentreData` nesnesini bellekten okur ve `captures/<matchId>.json`
+olarak kaydeder. Zaman aşımı gibi hatalarda maç atlanır ve `captures/failed_ids.txt`
+dosyasına yazılır; `--ids-file captures/failed_ids.txt` ile yeniden denenebilir.
 
 ```bash
 pip install -r requirements.txt && playwright install chromium
