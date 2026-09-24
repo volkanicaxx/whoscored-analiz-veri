@@ -13,6 +13,23 @@ Maç sayfasını (Match Centre) normal şekilde açın, sonra şunlardan birini 
 
 Dosyaları `captures/` klasörüne koyun (git'e eklenmez).
 
+### Alternatif: tarayıcı otomasyonu (`fetch_matches.py`)
+
+Maç sayfalarını gerçek bir Chromium penceresinde sırayla açar, sayfadaki
+`matchCentreData` nesnesini okur ve `captures/<matchId>.json` olarak kaydeder.
+
+```bash
+pip install -r requirements.txt && playwright install chromium
+python fetch_matches.py --ids 1900001 1900002
+python fetch_matches.py --ids-file ids.txt --max 30
+python fetch_matches.py --fixture-url "https://www.whoscored.com/..."   # sayfadaki maç bağlantılarını toplar
+```
+
+Kapatılamayan sınırlar: robots.txt'ye uyulur (okunamazsa çalışma durur), sayfalar
+arasında 5-10 sn bekleme, çalıştırma başına en fazla `--max` (50) maç, zaten kaydedilmiş
+maçlar yeniden açılmaz, engelleme/CAPTCHA sayfasında çalışma durur ve tarayıcı kimliği
+değiştirilmez. Sitenin kullanım koşullarına uymak kullanıcının sorumluluğundadır.
+
 ## 2. İşleme
 
 ```bash
