@@ -1,0 +1,6 @@
+duckdb>=1.5
+pyarrow>=25
+numpy>=2.0
+PySide6>=6.8
+psutil>=5.9
+pytest>=8
